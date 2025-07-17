@@ -63,7 +63,7 @@ class FactorGenerator:
         # (주니어 개발자: 긴 컬럼명부터 치환해야 겹치는 이름이 있을 때 안전합니다)
         for lower_col in sorted(col_map.keys(), key=lambda x: -len(x)):
             real_col = col_map[lower_col]
-            formula = re.sub(rf'\b{lower_col}\b', real_col, formula)
+            formula = re.sub(rf'\b{lower_col}\b', real_col, formula, flags=re.IGNORECASE)
         # print(f"[DEBUG] 치환된 수식: {formula}")
         # 5. 수식 평가
         try:
