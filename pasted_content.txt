@@ -1,0 +1,269 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+
+# --- 데이터 시뮬레이션 함수 ---
+@st.cache_data
+def simulate_financial_data(num_stocks=50, num_days=252):
+    dates = pd.bdate_range(start='2023-01-01', periods=num_days)
+    stocks = [f'STOCK_{i:03d}' for i in range(num_stocks)]
+    data = []
+    for stock in stocks:
+        prices = np.cumprod(1 + np.random.normal(0.0005, 0.01, num_days)) * 100
+        volumes = np.random.randint(100_000, 10_000_000, num_days)
+        pbr = np.random.uniform(0.5, 5.0, num_days)
+        roe = np.random.uniform(0.01, 0.30, num_days)
+        df = pd.DataFrame({
+            'Date': dates,
+            'Stock': stock,
+            'Close': prices,
+            'Open': prices * (1 + np.random.normal(0, 0.005, num_days)),
+            'High': prices * (1 + np.random.uniform(0, 0.01, num_days)),
+            'Low': prices * (1 - np.random.uniform(0, 0.01, num_days)),
+            'Volume': volumes,
+            'PBR': pbr,
+            'ROE': roe,
+            'Future_Return': np.random.normal(0.001, 0.02, num_days)
+        })
+        data.append(df)
+    combined_df = pd.concat(data).set_index('Date')
+    return combined_df
+
+financial_data = simulate_financial_data()
+
+# --- Gemini API 연동 함수 개선 ---
+def gemini_generate_features(user_idea, api_key):
+    prompt = f"""
+    아래는 투자 전략 아이디어입니다.
+    1. 이 아이디어에서 사용할 수 있는 금융 피처(예: PBR, ROE, Momentum, 거래량 등)를 최대한 많이 추천해 주세요.
+    2. 각 피처를 조합한 수식(파이썬 pandas 코드 형태)도 2~3개 제안해 주세요.
+    3. 머신러닝/딥러닝(예: 랜덤포레스트, MLP, XGBoost, PCA, AutoEncoder 등)으로 팩터를 생성하는 방법도 2~3개 제안해 주세요(예: 'RandomForest로 중요 피처 조합', 'MLP 임베딩', 'PCA 주성분', 'XGBoost 중요도').
+    4. 결과는 아래 예시처럼 JSON으로 반환해 주세요.
+
+    예시:
+    {{
+      "features": ["PBR", "ROE", "Momentum", "Volume"],
+      "formulas": [
+        "ROE / PBR",
+        "Close.pct_change(20) * Volume"
+      ],
+      "ml_factors": [
+        "RandomForestRegressor로 피처 중요도 기반 조합",
+        "MLPRegressor로 잠재 팩터(임베딩) 추출",
+        "XGBoost로 중요도 기반 조합",
+        "PCA로 주성분 팩터 생성"
+      ]
+    }}
+
+    아이디어: {user_idea}
+    """
+    # 최신 엔드포인트 사용
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 512}
+    }
+    params = {"key": api_key}
+    try:
+        response = requests.post(url, headers=headers, params=params, json=data)
+        response.raise_for_status()
+        text = response.json()['candidates'][0]['content']['parts'][0]['text']
+        import json
+        text = text.strip()
+        # 코드블록 제거 (더 견고하게)
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.endswith("```"):
+            text = text[:-3]
+        # JSON 파싱
+        try:
+            return json.loads(text)
+        except Exception as e:
+            raise ValueError(f"Gemini 응답을 JSON으로 파싱할 수 없습니다: {e}\n응답 내용: {text}")
+    except Exception as e:
+        raise RuntimeError(f"Gemini API 호출 오류: {e}")
+
+# --- UI ---
+st.title("시장 아이디어 기반 AI 팩터 생성기")
+
+api_key = st.text_input("Gemini API Key를 입력하세요", type="password")
+st.markdown("**시장 아이디어를 직접 입력하거나 .md 파일을 업로드하세요.**")
+col1, col2 = st.columns(2)
+with col1:
+    user_idea = st.text_area("시장 아이디어 입력", height=150)
+with col2:
+    uploaded_file = st.file_uploader(".md 파일 업로드", type=["md"])
+    if uploaded_file:
+        user_idea = uploaded_file.read().decode("utf-8")
+
+if st.button("AI로 피처/수식/ML팩터 추천받기") and api_key and user_idea:
+    with st.spinner("Gemini AI가 아이디어를 분석 중입니다..."):
+        try:
+            result = gemini_generate_features(user_idea, api_key)
+            st.session_state['ai_result'] = result
+            st.success("추천 결과:")
+            st.write("**추천 피처:**", ", ".join(result.get("features", [])))
+            st.write("**추천 수식:**")
+            for formula in result.get("formulas", []):
+                st.code(formula, language="python")
+            st.write("**ML/DL 기반 팩터 생성법:**")
+            for ml_factor in result.get("ml_factors", []):
+                st.write("- " + ml_factor)
+        except Exception as e:
+            st.error(f"Gemini API 오류: {e}")
+
+# --- 팩터 생성 UI ---
+result = st.session_state.get('ai_result', None)
+if result:
+    st.markdown("---")
+    st.subheader("추천 수식/ML팩터 중 팩터로 생성")
+    tab1, tab2 = st.tabs(["수식 기반", "ML/DL 기반"])
+    with tab1:
+        selected_formula = st.selectbox("수식 선택", result.get("formulas", []))
+        if st.button("이 수식으로 팩터 생성"):
+            try:
+                # 허용된 컬럼만 포함됐는지 체크
+                allowed_cols = set(financial_data.columns)
+                import re
+                tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", selected_formula)
+                for token in tokens:
+                    if token not in allowed_cols and not token.isnumeric():
+                        st.error(f"허용되지 않은 컬럼/변수: {token}")
+                        st.stop()
+                # eval 실행
+                try:
+                    factor_series = financial_data.eval(selected_formula)
+                except Exception as e:
+                    st.error(f"수식 실행 오류: {e}")
+                    st.stop()
+                # 값 검증
+                if factor_series.isnull().all():
+                    st.error("수식 결과가 모두 NaN입니다. 수식을 확인하세요.")
+                    st.stop()
+                if np.abs(factor_series).max() > 1e6:
+                    st.warning("수식 결과값이 비정상적으로 큽니다. 수식을 다시 확인하세요.")
+                factor_name = f"AI_{selected_formula.replace(' ', '').replace('*','x').replace('/','_div_')}"
+                multi_index_df = financial_data.reset_index().set_index(['Date', 'Stock'])
+                factor_series = pd.Series(factor_series.values, index=multi_index_df.index, name=factor_name)
+                factor_series = factor_series.fillna(method='ffill').fillna(method='bfill')
+                simulated_ic = np.random.uniform(0.01, 0.10)
+                simulated_icir = simulated_ic / np.random.uniform(0.01, 0.05)
+                if 'factor_zoo' not in st.session_state:
+                    st.session_state.factor_zoo = {}
+                st.session_state.factor_zoo[factor_name] = {
+                    'data': factor_series,
+                    'ic': simulated_ic,
+                    'icir': simulated_icir,
+                    'expression': selected_formula
+                }
+                st.success(f"팩터 '{factor_name}' 생성 완료!")
+            except Exception as e:
+                st.error(f"팩터 생성 오류: {e}")
+    with tab2:
+        selected_ml = st.selectbox("ML/DL 팩터 생성법 선택", result.get("ml_factors", []))
+        if st.button("이 ML/DL 방법으로 팩터 생성"):
+            try:
+                # 입력 피처 체크
+                required_cols = ['Close', 'Volume', 'PBR', 'ROE']
+                for col in required_cols:
+                    if col not in financial_data.columns:
+                        st.error(f"데이터에 '{col}' 컬럼이 없습니다.")
+                        st.stop()
+                # 라이브러리 import 체크
+                try:
+                    if "RandomForest" in selected_ml:
+                        from sklearn.ensemble import RandomForestRegressor
+                    elif "MLP" in selected_ml:
+                        from sklearn.neural_network import MLPRegressor
+                    elif "XGBoost" in selected_ml:
+                        from xgboost import XGBRegressor
+                    elif "PCA" in selected_ml:
+                        from sklearn.decomposition import PCA
+                    elif "AutoEncoder" in selected_ml:
+                        from sklearn.preprocessing import StandardScaler
+                        from tensorflow.keras.models import Model
+                        from tensorflow.keras.layers import Input, Dense
+                except ImportError as e:
+                    st.error(f"필요한 라이브러리가 설치되어 있지 않습니다: {e}")
+                    st.stop()
+                # 모델 학습 및 팩터 생성
+                if "RandomForest" in selected_ml:
+                    X = financial_data[['Close', 'Volume', 'PBR', 'ROE']].fillna(0)
+                    y = financial_data['Future_Return'].fillna(0)
+                    model = RandomForestRegressor(n_estimators=100, random_state=42)
+                    model.fit(X, y)
+                    importances = model.feature_importances_
+                    factor_series = pd.Series(np.dot(X, importances), index=X.index)
+                    factor_name = "RF_중요도_조합"
+                elif "MLP" in selected_ml:
+                    X = financial_data[['Close', 'Volume', 'PBR', 'ROE']].fillna(0)
+                    y = financial_data['Future_Return'].fillna(0)
+                    model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=200, random_state=42)
+                    model.fit(X, y)
+                    factor_series = pd.Series(model.predict(X), index=X.index)
+                    factor_name = "MLP_임베딩"
+                elif "XGBoost" in selected_ml:
+                    X = financial_data[['Close', 'Volume', 'PBR', 'ROE']].fillna(0)
+                    y = financial_data['Future_Return'].fillna(0)
+                    model = XGBRegressor(n_estimators=100, random_state=42)
+                    model.fit(X, y)
+                    importances = model.feature_importances_
+                    factor_series = pd.Series(np.dot(X, importances), index=X.index)
+                    factor_name = "XGB_중요도_조합"
+                elif "PCA" in selected_ml:
+                    X = financial_data[['Close', 'Volume', 'PBR', 'ROE']].fillna(0)
+                    pca = PCA(n_components=1)
+                    factor_series = pd.Series(pca.fit_transform(X).flatten(), index=X.index)
+                    factor_name = "PCA_주성분"
+                elif "AutoEncoder" in selected_ml:
+                    X = financial_data[['Close', 'Volume', 'PBR', 'ROE']].fillna(0)
+                    scaler = StandardScaler()
+                    X_scaled = scaler.fit_transform(X)
+                    input_dim = X_scaled.shape[1]
+                    input_layer = Input(shape=(input_dim,))
+                    encoded = Dense(2, activation='relu')(input_layer)
+                    decoded = Dense(input_dim, activation='linear')(encoded)
+                    autoencoder = Model(input_layer, decoded)
+                    autoencoder.compile(optimizer='adam', loss='mse')
+                    autoencoder.fit(X_scaled, X_scaled, epochs=20, batch_size=32, verbose=0)
+                    encoder = Model(input_layer, encoded)
+                    factor_series = pd.Series(encoder.predict(X_scaled)[:,0], index=X.index)
+                    factor_name = "AutoEncoder_임베딩"
+                else:
+                    st.warning("아직 자동화된 ML/DL 팩터 생성 코드가 없습니다.")
+                    st.stop()
+                # 멀티 인덱스 보장
+                multi_index_df = financial_data.reset_index().set_index(['Date', 'Stock'])
+                factor_series = pd.Series(factor_series.values, index=multi_index_df.index, name=factor_name)
+                factor_series = factor_series.fillna(method='ffill').fillna(method='bfill')
+                simulated_ic = np.random.uniform(0.01, 0.10)
+                simulated_icir = simulated_ic / np.random.uniform(0.01, 0.05)
+                if 'factor_zoo' not in st.session_state:
+                    st.session_state.factor_zoo = {}
+                st.session_state.factor_zoo[factor_name] = {
+                    'data': factor_series,
+                    'ic': simulated_ic,
+                    'icir': simulated_icir,
+                    'expression': selected_ml
+                }
+                st.success(f"팩터 '{factor_name}' 생성 완료!")
+            except Exception as e:
+                st.error(f"ML/DL 팩터 생성 오류: {e}")
+
+# --- 팩터 동물원 현황 ---
+if 'factor_zoo' in st.session_state and st.session_state.factor_zoo:
+    st.markdown("---")
+    st.subheader("팩터 동물원 (Factor Zoo) 현황 🐒")
+    zoo_data = [
+        {
+            '팩터명': name,
+            'IC': info['ic'],
+            'ICIR': info['icir'],
+            '수식/방법': info['expression']
+        }
+        for name, info in st.session_state.factor_zoo.items()
+    ]
+    st.dataframe(pd.DataFrame(zoo_data).sort_values(by='IC', ascending=False), use_container_width=True)
+
